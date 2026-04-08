@@ -1,0 +1,14 @@
+[project]
+name = "discord-call-summarizer"
+version = "0.1.0"
+description = "A Discord bot that joins voice channels, transcribes conversations, and posts periodic summaries using local models."
+requires-python = ">=3.10"
+dependencies = [
+    "discord.py[voice]>=2.3.0",
+    "faster-whisper>=1.0.0",
+    "ollama>=0.4.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+bot = "bot.main:main"
