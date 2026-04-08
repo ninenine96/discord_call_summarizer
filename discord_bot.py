@@ -100,33 +100,37 @@ async def finish_recording(guild_id: int, channel=None):
 @bot.slash_command(name="transcribe", description="Start transcribing the current voice call")
 @check_admin()
 async def transcribe(ctx: discord.ApplicationContext):
+    await ctx.defer(ephemeral=True)  # must be first, before any async work
+
     if not ctx.guild_id:
-        await ctx.respond("This command can only be used in a server.", ephemeral=True)
+        await ctx.followup.send("This command can only be used in a server.", ephemeral=True)
         return
-    
+
     if ctx.guild_id in active_sessions:
-        await ctx.respond("Already recording.", ephemeral=True)
+        await ctx.followup.send("Already recording.", ephemeral=True)
         return
 
     voice_state = ctx.user.voice
     if not voice_state or not voice_state.channel:
-        await ctx.respond("Join a voice channel first.", ephemeral=True)
+        await ctx.followup.send("Join a voice channel first.", ephemeral=True)
         return
 
     vc = await voice_state.channel.connect()
 
-    # Wait for the voice client to be fully connected before recording
-    for _ in range(20):
+    # wait up to 10s for connection to stabilise
+    for _ in range(10):
+        await asyncio.sleep(1)
         if vc.is_connected():
             break
-        await asyncio.sleep(0.25)
-    else:
-        await vc.disconnect()
-        await ctx.respond("Failed to connect to voice channel.", ephemeral=True)
+
+    print(f"Connected: {vc.is_connected()}, channel: {vc.channel}")
+
+    if not vc.is_connected():
+        await vc.disconnect(force=True)
+        await ctx.followup.send("Could not stabilise voice connection, try again.", ephemeral=True)
         return
 
     sink = TranscriptionSink()
-
     for member in voice_state.channel.members:
         sink.user_names[member.id] = member.display_name
 
@@ -139,11 +143,10 @@ async def transcribe(ctx: discord.ApplicationContext):
         "channel": ctx.channel,
     }
 
-    await ctx.respond(
+    await ctx.followup.send(
         f"🔴 Recording in **{voice_state.channel.name}**. Use `/stop` when done.",
         ephemeral=True,
     )
-
 
 @bot.slash_command(name="stop", description="Stop recording and post the summary")
 @check_admin()
