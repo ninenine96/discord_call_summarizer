@@ -1,6 +1,6 @@
-import discord_bot
+import discord
 from discord.ext import commands
-from discord_bot import app_commands
+from discord import app_commands
 import asyncio
 import os
 from datetime import datetime
@@ -8,11 +8,14 @@ from datetime import datetime
 from transcriber import transcribe_audio
 from summariser import summarise_transcript
 
+from dotenv import load_dotenv
+load_dotenv()
+
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 SUMMARY_CHANNEL_ID = int(os.getenv("SUMMARY_CHANNEL_ID", "0"))
 ADMIN_ROLE_NAME = os.getenv("ADMIN_ROLE_NAME", "Admin")
 
-intents = discord_bot.Intents.default()
+intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 
@@ -20,15 +23,15 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 active_sessions: dict[int, dict] = {}
 
 
-class TranscriptionSink(discord_bot.sinks.WaveSink):
+class TranscriptionSink(discord.sinks.WaveSink):
     def __init__(self):
         super().__init__()
         self.user_names: dict[int, str] = {}
 
 
 def is_admin():
-    async def predicate(interaction: discord_bot.Interaction) -> bool:
-        role = discord_bot.utils.get(interaction.guild.roles, name=ADMIN_ROLE_NAME)
+    async def predicate(interaction: discord.Interaction) -> bool:
+        role = discord.utils.get(interaction.guild.roles, name=ADMIN_ROLE_NAME)
         if role and role in interaction.user.roles:
             return True
         if interaction.user.guild_permissions.administrator:
@@ -78,7 +81,7 @@ async def finish_recording(guild_id: int, channel=None):
     await status_msg.edit(content="�� Summarising…")
     summary = await summarise_transcript(full_transcript)
 
-    embed = discord_bot.Embed(
+    embed = discord.Embed(
         title="📋 Meeting Summary",
         description=summary,
         color=0x5865F2,
@@ -97,7 +100,7 @@ async def finish_recording(guild_id: int, channel=None):
 
 @bot.tree.command(name="transcribe", description="Start transcribing the current voice call")
 @is_admin()
-async def transcribe(interaction: discord_bot.Interaction):
+async def transcribe(interaction: discord.Interaction):
     if interaction.guild_id in active_sessions:
         await interaction.response.send_message("Already recording.", ephemeral=True)
         return
@@ -130,7 +133,7 @@ async def transcribe(interaction: discord_bot.Interaction):
 
 @bot.tree.command(name="stop", description="Stop recording and post the summary")
 @is_admin()
-async def stop(interaction: discord_bot.Interaction):
+async def stop(interaction: discord.Interaction):
     if interaction.guild_id not in active_sessions:
         await interaction.response.send_message("No active recording.", ephemeral=True)
         return
@@ -140,7 +143,7 @@ async def stop(interaction: discord_bot.Interaction):
 
 @bot.tree.command(name="status", description="Check if recording is active")
 @is_admin()
-async def status(interaction: discord_bot.Interaction):
+async def status(interaction: discord.Interaction):
     session = active_sessions.get(interaction.guild_id)
     if not session:
         await interaction.response.send_message("No active recording.", ephemeral=True)

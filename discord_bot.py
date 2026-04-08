@@ -105,25 +105,7 @@ async def transcribe(ctx: discord.ApplicationContext):
         return
     
     if ctx.guild_id in active_sessions:
-        await ctx.respond("Already recording.", ephemeral=True)    
-        
-        @bot.slash_command(name="transcribe", description="Start transcribing the current voice call")
-        async def transcribe(ctx):
-            voice_state = ctx.author.voice
-            if not voice_state:
-                await ctx.respond("You are not in a voice channel.")
-                return
-            
-            # Check for existing voice client in the guild
-            vc = ctx.voice_client
-            if vc is None or not vc.is_connected() or vc.channel != voice_state.channel:
-                vc = await voice_state.channel.connect()
-            
-            # Proceed with recording setup
-            sink = discord.sinks.WaveSink()  # Assuming this is defined
-            vc.start_recording(sink, lambda s, v: None, ctx.channel)
-            await ctx.respond("Started transcribing.")
-    
+        await ctx.respond("Already recording.", ephemeral=True)
         return
 
     voice_state = ctx.user.voice
