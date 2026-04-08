@@ -42,16 +42,6 @@ def check_admin():
     return commands.check(predicate)
 
 
-async def _wait_until_connected(vc: discord.VoiceClient, timeout: float = 10.0) -> bool:
-    """Poll until the voice client is fully connected or timeout expires."""
-    end = asyncio.get_event_loop().time() + timeout
-    while asyncio.get_event_loop().time() < end:
-        if vc.is_connected():
-            return True
-        await asyncio.sleep(0.25)
-    return False
-
-
 async def finish_recording(guild_id: int, channel=None):
     session = active_sessions.pop(guild_id, None)
     if not session:
@@ -132,18 +122,30 @@ async def transcribe(ctx: discord.ApplicationContext):
     # Defer immediately — voice connection can take several seconds
     await ctx.defer(ephemeral=True)
 
-    vc = await voice_state.channel.connect()
-
-    if not await _wait_until_connected(vc):
-        await vc.disconnect()
-        await ctx.followup.send("Failed to connect to voice channel.", ephemeral=True)
+    try:
+        vc = await voice_state.channel.connect(timeout=15.0)
+    except asyncio.TimeoutError:
+        await ctx.followup.send("Timed out connecting to voice channel.", ephemeral=True)
         return
+
+    # Give the voice WebSocket time to fully stabilise
+    await asyncio.sleep(2)
 
     sink = TranscriptionSink()
     for member in voice_state.channel.members:
         sink.user_names[member.id] = member.display_name
 
-    vc.start_recording(sink, lambda sink, vc: None, ctx.channel)
+    try:
+        vc.start_recording(sink, lambda s, v: None, ctx.channel)
+    except discord.sinks.errors.RecordingException:
+        # Voice WS may need more time — retry once
+        await asyncio.sleep(3)
+        try:
+            vc.start_recording(sink, lambda s, v: None, ctx.channel)
+        except Exception as e:
+            await vc.disconnect(force=True)
+            await ctx.followup.send(f"Failed to start recording: {e}", ephemeral=True)
+            return
 
     active_sessions[ctx.guild_id] = {
         "voice_client": vc,
