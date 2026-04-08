@@ -26,11 +26,22 @@ class SummarizationService:
     ) -> None:
         self.model = model
         self.client = ollama.AsyncClient(host=ollama_host)
+        log.info("SummarizationService initialized (model=%s, host=%s)", model, ollama_host)
 
     async def summarize(self, transcript: str) -> str:
         """Return a bullet-point summary of the transcript."""
         if not transcript.strip():
+            log.warning("Summarize called with empty transcript — skipping")
             return "_No speech detected in this interval._"
+
+        import time as _time
+
+        log.info(
+            "Requesting summarization from Ollama (model=%s, transcript=%d chars)",
+            self.model, len(transcript),
+        )
+        log.debug("Transcript preview: %.200s…", transcript)
+        t0 = _time.monotonic()
         try:
             response = await self.client.chat(
                 model=self.model,
@@ -40,7 +51,18 @@ class SummarizationService:
                 ],
                 options={"temperature": 0.3, "num_predict": 512},
             )
-            return response["message"]["content"].strip()
+            elapsed = _time.monotonic() - t0
+            summary = response["message"]["content"].strip()
+            log.info(
+                "Summarization complete in %.2fs (%d chars output)",
+                elapsed, len(summary),
+            )
+            log.debug("Summary preview: %.200s…", summary)
+            return summary
         except Exception:
-            log.exception("Summarization failed")
+            elapsed = _time.monotonic() - t0
+            log.exception(
+                "Summarization failed after %.2fs (model=%s, transcript=%d chars)",
+                elapsed, self.model, len(transcript),
+            )
             return "_Summarization failed. Check logs._"

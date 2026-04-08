@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import io
-import struct
+import logging
 import time
 import wave
-from collections import defaultdict
 
 import discord
+
+log = logging.getLogger(__name__)
 
 
 class AudioBuffer:
     """Accumulates raw PCM frames for a single user."""
 
-    def __init__(self, user: discord.Member | discord.User) -> None:
-        self.user = user
+    def __init__(self) -> None:
         self.frames: list[bytes] = []
         self.last_packet_time: float = time.time()
 
@@ -44,9 +44,14 @@ class AudioBuffer:
 
 
 class CallRecorderSink(discord.sinks.Sink):
-    """A discord.py Sink that stores per-user audio buffers.
+    """A pycord Sink that stores per-user audio buffers.
 
-    Call `harvest()` to retrieve and reset the accumulated audio.
+    IMPORTANT: write() is called from the voice-receive thread.
+    It must never do guild/member lookups or anything that touches
+    the event loop — doing so crashes the receiver silently and
+    causes the bot to disconnect after ~10-15 s.
+
+    Member resolution is deferred to harvest-time on the main thread.
     """
 
     def __init__(self) -> None:
@@ -54,28 +59,47 @@ class CallRecorderSink(discord.sinks.Sink):
         self.buffers: dict[int, AudioBuffer] = {}
 
     def write(self, data: bytes, user: int) -> None:  # type: ignore[override]
-        if user not in self.buffers:
-            member = self.vc.guild.get_member(user) if self.vc else None
-            self.buffers[user] = AudioBuffer(member or user)
-        self.buffers[user].write(data)
+        try:
+            if user not in self.buffers:
+                self.buffers[user] = AudioBuffer()
+                log.debug("New audio buffer created for user %s", user)
+            self.buffers[user].write(data)
+        except Exception:
+            log.exception("Error in sink.write for user %s", user)
 
     def harvest(self) -> dict[int, bytes]:
         """Return {user_id: wav_bytes} for all users, then clear buffers."""
         results: dict[int, bytes] = {}
         for uid, buf in self.buffers.items():
             if buf.frames:
+                duration = buf.duration_seconds()
                 results[uid] = buf.to_wav_bytes()
+                log.info(
+                    "Harvested %.1fs of audio from user %s (%d frames, %d bytes WAV)",
+                    duration, uid, len(buf.frames), len(results[uid]),
+                )
                 buf.clear()
+        if not results:
+            log.debug("Harvest called but no audio frames found in any buffer")
+        else:
+            log.info("Harvested audio from %d user(s)", len(results))
         return results
 
     def get_user_display_names(self) -> dict[int, str]:
+        """Resolve display names on the main thread (safe to access guild)."""
         names: dict[int, str] = {}
-        for uid, buf in self.buffers.items():
-            if isinstance(buf.user, (discord.Member, discord.User)):
-                names[uid] = buf.user.display_name
+        guild = self.vc.guild if self.vc else None
+        for uid in self.buffers:
+            member = guild.get_member(uid) if guild else None
+            if member:
+                names[uid] = member.display_name
             else:
+                log.debug("Could not resolve member for uid %s, using fallback", uid)
                 names[uid] = f"User-{uid}"
+        log.debug("Resolved display names: %s", names)
         return names
 
     def cleanup(self) -> None:
+        user_count = len(self.buffers)
         self.buffers.clear()
+        log.info("Sink cleaned up — cleared %d user buffer(s)", user_count)

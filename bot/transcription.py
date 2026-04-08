@@ -37,22 +37,44 @@ class TranscriptionService:
 
     def _transcribe_sync(self, wav_bytes: bytes) -> str:
         """Blocking transcription — called in a thread."""
+        import time as _time
+
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
             tmp.write(wav_bytes)
             tmp.flush()
-            segments, _info = self.model.transcribe(
+            t0 = _time.monotonic()
+            segments, info = self.model.transcribe(
                 tmp.name, beam_size=5, vad_filter=True,
             )
-            return " ".join(seg.text.strip() for seg in segments)
+            parts = []
+            for seg in segments:
+                log.debug(
+                    "  segment [%.1fs → %.1fs]: %s",
+                    seg.start, seg.end, seg.text.strip(),
+                )
+                parts.append(seg.text.strip())
+            elapsed = _time.monotonic() - t0
+            text = " ".join(parts)
+            log.info(
+                "Transcribed %.1fs audio → %d chars in %.2fs (lang=%s, prob=%.2f)",
+                info.duration, len(text), elapsed,
+                info.language, info.language_probability,
+            )
+            return text
 
     async def transcribe(self, wav_bytes: bytes) -> str:
         """Transcribe WAV audio bytes and return the text."""
+        log.info("Transcription requested for %d bytes of WAV audio", len(wav_bytes))
         try:
             loop = asyncio.get_running_loop()
             text = await loop.run_in_executor(
                 None, self._transcribe_sync, wav_bytes
             )
+            if text:
+                log.info("Transcription result (%d chars): %.100s…", len(text), text)
+            else:
+                log.warning("Transcription returned empty text")
             return text.strip()
         except Exception:
-            log.exception("Transcription failed")
+            log.exception("Transcription failed for %d bytes of audio", len(wav_bytes))
             return ""
