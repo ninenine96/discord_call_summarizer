@@ -2,12 +2,13 @@ import discord
 from discord.ext import commands
 import asyncio
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from transcriber import transcribe_audio
 from summariser import summarise_transcript
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -30,14 +31,25 @@ class TranscriptionSink(discord.sinks.WaveSink):
 
 def check_admin():
     async def predicate(ctx: discord.ApplicationContext) -> bool:
+        if ctx.user.guild_permissions.administrator:
+            return True
         role = discord.utils.get(ctx.guild.roles, name=ADMIN_ROLE_NAME)
         if role and role in ctx.user.roles:
             return True
-        if ctx.user.guild_permissions.administrator:
-            return True
         await ctx.respond("You need the Admin role.", ephemeral=True)
         return False
+
     return commands.check(predicate)
+
+
+async def _wait_until_connected(vc: discord.VoiceClient, timeout: float = 10.0) -> bool:
+    """Poll until the voice client is fully connected or timeout expires."""
+    end = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < end:
+        if vc.is_connected():
+            return True
+        await asyncio.sleep(0.25)
+    return False
 
 
 async def finish_recording(guild_id: int, channel=None):
@@ -45,14 +57,14 @@ async def finish_recording(guild_id: int, channel=None):
     if not session:
         return
 
-    voice_client = session["voice_client"]
-    sink = session["sink"]
-    start_time = session["start_time"]
+    vc: discord.VoiceClient = session["voice_client"]
+    sink: TranscriptionSink = session["sink"]
+    start_time: datetime = session["start_time"]
     post_channel = channel or bot.get_channel(SUMMARY_CHANNEL_ID)
 
-    voice_client.stop_recording()
+    vc.stop_recording()
     await asyncio.sleep(1)
-    await voice_client.disconnect()
+    await vc.disconnect()
 
     if not post_channel:
         print("No summary channel configured.")
@@ -75,7 +87,8 @@ async def finish_recording(guild_id: int, channel=None):
         return
 
     full_transcript = "\n".join(transcript_lines)
-    minutes = int((datetime.utcnow() - start_time).total_seconds() // 60)
+    duration = datetime.now(timezone.utc) - start_time
+    minutes = int(duration.total_seconds() // 60)
 
     await status_msg.edit(content="🧠 Summarising…")
     summary = await summarise_transcript(full_transcript)
@@ -84,17 +97,20 @@ async def finish_recording(guild_id: int, channel=None):
         title="📋 Meeting Summary",
         description=summary,
         color=0x5865F2,
-        timestamp=datetime.utcnow(),
+        timestamp=datetime.now(timezone.utc),
     )
     embed.set_footer(text=f"Call duration: ~{minutes} min • {len(transcript_lines)} speakers")
     await status_msg.edit(content=None, embed=embed)
 
     thread = await post_channel.create_thread(
-        name=f"Transcript – {datetime.utcnow().strftime('%d %b %H:%M')}",
+        name=f"Transcript – {datetime.now(timezone.utc).strftime('%d %b %H:%M')}",
         message=status_msg,
     )
     for i in range(0, len(full_transcript), 1900):
-        await thread.send(f"```\n{full_transcript[i:i+1900]}\n```")
+        await thread.send(f"```\n{full_transcript[i:i + 1900]}\n```")
+
+
+# ── Slash commands ──────────────────────────────────────────────
 
 
 @bot.slash_command(name="transcribe", description="Start transcribing the current voice call")
@@ -103,7 +119,7 @@ async def transcribe(ctx: discord.ApplicationContext):
     if not ctx.guild_id:
         await ctx.respond("This command can only be used in a server.", ephemeral=True)
         return
-    
+
     if ctx.guild_id in active_sessions:
         await ctx.respond("Already recording.", ephemeral=True)
         return
@@ -113,33 +129,30 @@ async def transcribe(ctx: discord.ApplicationContext):
         await ctx.respond("Join a voice channel first.", ephemeral=True)
         return
 
+    # Defer immediately — voice connection can take several seconds
+    await ctx.defer(ephemeral=True)
+
     vc = await voice_state.channel.connect()
 
-    # Wait for the voice client to be fully connected before recording
-    for _ in range(20):
-        if vc.is_connected():
-            break
-        await asyncio.sleep(0.25)
-    else:
+    if not await _wait_until_connected(vc):
         await vc.disconnect()
-        await ctx.respond("Failed to connect to voice channel.", ephemeral=True)
+        await ctx.followup.send("Failed to connect to voice channel.", ephemeral=True)
         return
 
     sink = TranscriptionSink()
-
     for member in voice_state.channel.members:
         sink.user_names[member.id] = member.display_name
 
-    vc.start_recording(sink, lambda s, v: None, ctx.channel)
+    vc.start_recording(sink, lambda sink, vc: None, ctx.channel)
 
     active_sessions[ctx.guild_id] = {
         "voice_client": vc,
         "sink": sink,
-        "start_time": datetime.utcnow(),
+        "start_time": datetime.now(timezone.utc),
         "channel": ctx.channel,
     }
 
-    await ctx.respond(
+    await ctx.followup.send(
         f"🔴 Recording in **{voice_state.channel.name}**. Use `/stop` when done.",
         ephemeral=True,
     )
@@ -162,12 +175,15 @@ async def status(ctx: discord.ApplicationContext):
     if not session:
         await ctx.respond("No active recording.", ephemeral=True)
         return
-    duration = datetime.utcnow() - session["start_time"]
+    duration = datetime.now(timezone.utc) - session["start_time"]
     minutes = int(duration.total_seconds() // 60)
     seconds = int(duration.total_seconds() % 60)
     await ctx.respond(
         f"🔴 Recording active — {minutes}m {seconds}s elapsed.", ephemeral=True
     )
+
+
+# ── Events ──────────────────────────────────────────────────────
 
 
 @bot.event
@@ -177,6 +193,7 @@ async def on_ready():
 
 @bot.event
 async def on_voice_state_update(member, before, after):
+    """Auto-stop recording when all humans leave the voice channel."""
     guild_id = member.guild.id
     session = active_sessions.get(guild_id)
     if not session:
