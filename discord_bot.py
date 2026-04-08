@@ -114,6 +114,17 @@ async def transcribe(ctx: discord.ApplicationContext):
         return
 
     vc = await voice_state.channel.connect()
+
+    # Wait for the voice client to be fully connected before recording
+    for _ in range(20):
+        if vc.is_connected():
+            break
+        await asyncio.sleep(0.25)
+    else:
+        await vc.disconnect()
+        await ctx.respond("Failed to connect to voice channel.", ephemeral=True)
+        return
+
     sink = TranscriptionSink()
 
     for member in voice_state.channel.members:
