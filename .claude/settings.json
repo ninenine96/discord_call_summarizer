@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -n \"decrypt\\\\|dave_session\\\\|unbox\" /tmp/dpy/discord/voice_client.py | head -30)",
+      "Read(//tmp/dpy/discord/**)",
+      "Bash(ldconfig -p)",
+      "Bash(dpkg -l)",
+      "Bash(python3 -c \"import discord; discord.opus.load_opus\\('libopus.so.0'\\); print\\('opus loaded'\\)\")",
+      "Bash(pip index *)",
+      "Bash(pip install *)"
+    ]
+  }
+}

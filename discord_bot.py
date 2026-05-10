@@ -1,8 +1,12 @@
 import discord
 from discord.ext import commands
 import asyncio
+import io
+import logging
 import os
+import wave
 from datetime import datetime
+
 
 from transcriber import transcribe_audio
 from summariser import summarise_transcript
@@ -14,6 +18,15 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 SUMMARY_CHANNEL_ID = int(os.getenv("SUMMARY_CHANNEL_ID", "0"))
 ADMIN_ROLE_NAME = os.getenv("ADMIN_ROLE_NAME", "Admin")
 
+# Discord audio: 48 kHz, stereo, 16-bit PCM
+WAV_HEADER_BYTES = 44
+BYTES_PER_SEC = 48000 * 2 * 2
+CHUNK_INTERVAL = 30        # seconds between live-transcript polls
+MIN_CHUNK_BYTES = BYTES_PER_SEC * 2  # skip chunk if < 2 s of new audio
+
+if not discord.opus.is_loaded():
+    discord.opus.load_opus("libopus.so.0")
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
@@ -22,10 +35,22 @@ bot = discord.Bot(intents=intents)
 active_sessions: dict[int, dict] = {}
 
 
+def _pcm_to_wav(pcm: bytes) -> io.BytesIO:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(48000)
+        wf.writeframes(pcm)
+    buf.seek(0)
+    return buf
+
+
 class TranscriptionSink(discord.sinks.WaveSink):
     def __init__(self):
         super().__init__()
         self.user_names: dict[int, str] = {}
+        self._pcm_offsets: dict[int, int] = {}  # PCM bytes already sent to live thread
 
 
 def check_admin():
@@ -40,6 +65,42 @@ def check_admin():
     return commands.check(predicate)
 
 
+async def _transcribe_new_pcm(sink: TranscriptionSink, user_id: int) -> str | None:
+    """Transcribe PCM bytes accumulated since the last call for this user."""
+    audio_data = sink.audio_data.get(user_id)
+    if not audio_data:
+        return None
+    all_pcm = audio_data.file.getvalue()[WAV_HEADER_BYTES:]
+    offset = sink._pcm_offsets.get(user_id, 0)
+    new_pcm = all_pcm[offset:]
+    if len(new_pcm) < MIN_CHUNK_BYTES:
+        return None
+    sink._pcm_offsets[user_id] = offset + len(new_pcm)
+    return await transcribe_audio(_pcm_to_wav(new_pcm))
+
+
+async def live_transcription_loop(guild_id: int):
+    try:
+        while True:
+            await asyncio.sleep(CHUNK_INTERVAL)
+            session = active_sessions.get(guild_id)
+            if not session:
+                break
+            sink: TranscriptionSink = session["sink"]
+            for user_id in list(sink.audio_data):
+                name = sink.user_names.get(user_id, f"User {user_id}")
+                try:
+                    text = await _transcribe_new_pcm(sink, user_id)
+                    if text and text.strip():
+                        line = f"{name}: {text.strip()}"
+                        session["transcript_lines"].append(line)
+                        print(f"[transcript] {line}", flush=True)
+                except Exception as e:
+                    logging.warning(f"Live transcription failed for {name}: {e}")
+    except asyncio.CancelledError:
+        pass
+
+
 async def finish_recording(guild_id: int, channel=None):
     session = active_sessions.pop(guild_id, None)
     if not session:
@@ -48,27 +109,34 @@ async def finish_recording(guild_id: int, channel=None):
     voice_client = session["voice_client"]
     sink = session["sink"]
     start_time = session["start_time"]
+    live_task = session.get("live_task")
+    transcript_lines: list[str] = session.get("transcript_lines", [])
     post_channel = channel or bot.get_channel(SUMMARY_CHANNEL_ID)
+
+    if live_task:
+        live_task.cancel()
 
     voice_client.stop_recording()
     await asyncio.sleep(1)
     await voice_client.disconnect()
 
     if not post_channel:
-        print("No summary channel configured.")
+        logging.warning("No summary channel configured.")
         return
 
-    status_msg = await post_channel.send("⏳ Transcribing audio…")
+    status_msg = await post_channel.send("⏳ Finishing transcription…")
 
-    transcript_lines = []
-    for user_id, audio_data in sink.audio_data.items():
+    # Transcribe any audio recorded after the last live chunk
+    for user_id in list(sink.audio_data):
         name = sink.user_names.get(user_id, f"User {user_id}")
         try:
-            text = await transcribe_audio(audio_data.file)
-            if text.strip():
-                transcript_lines.append(f"{name}: {text.strip()}")
+            text = await _transcribe_new_pcm(sink, user_id)
+            if text and text.strip():
+                line = f"{name}: {text.strip()}"
+                transcript_lines.append(line)
+                logging.info(f"[transcript] {line}")
         except Exception as e:
-            print(f"Transcription failed for {name}: {e}")
+            logging.warning(f"Final transcription failed for {name}: {e}")
 
     if not transcript_lines:
         await status_msg.edit(content="No speech detected — nothing to summarise.")
@@ -76,6 +144,7 @@ async def finish_recording(guild_id: int, channel=None):
 
     full_transcript = "\n".join(transcript_lines)
     minutes = int((datetime.utcnow() - start_time).total_seconds() // 60)
+    speaker_count = len({line.split(":")[0] for line in transcript_lines})
 
     await status_msg.edit(content="🧠 Summarising…")
     summary = await summarise_transcript(full_transcript)
@@ -86,21 +155,15 @@ async def finish_recording(guild_id: int, channel=None):
         color=0x5865F2,
         timestamp=datetime.utcnow(),
     )
-    embed.set_footer(text=f"Call duration: ~{minutes} min • {len(transcript_lines)} speakers")
+    embed.set_footer(text=f"Call duration: ~{minutes} min • {speaker_count} speakers")
     await status_msg.edit(content=None, embed=embed)
 
-    thread = await post_channel.create_thread(
-        name=f"Transcript – {datetime.utcnow().strftime('%d %b %H:%M')}",
-        message=status_msg,
-    )
-    for i in range(0, len(full_transcript), 1900):
-        await thread.send(f"```\n{full_transcript[i:i+1900]}\n```")
 
 
 @bot.slash_command(name="transcribe", description="Start transcribing the current voice call")
 @check_admin()
 async def transcribe(ctx: discord.ApplicationContext):
-    await ctx.defer(ephemeral=True)  # must be first, before any async work
+    await ctx.defer(ephemeral=True)
 
     if not ctx.guild_id:
         await ctx.followup.send("This command can only be used in a server.", ephemeral=True)
@@ -115,38 +178,48 @@ async def transcribe(ctx: discord.ApplicationContext):
         await ctx.followup.send("Join a voice channel first.", ephemeral=True)
         return
 
-    vc = await voice_state.channel.connect()
-
-    # wait up to 10s for connection to stabilise
-    for _ in range(10):
-        await asyncio.sleep(1)
-        if vc.is_connected():
-            break
-
-    print(f"Connected: {vc.is_connected()}, channel: {vc.channel}")
-
-    if not vc.is_connected():
-        await vc.disconnect(force=True)
-        await ctx.followup.send("Could not stabilise voice connection, try again.", ephemeral=True)
+    print(f"[transcribe] Connecting to {voice_state.channel.name}...")
+    try:
+        vc = await voice_state.channel.connect(reconnect=False)
+    except Exception as e:
+        print(f"[transcribe] connect() failed: {e}")
+        await ctx.followup.send("Failed to connect to voice channel.", ephemeral=True)
         return
+
+    print(f"[transcribe] connected, is_connected={vc.is_connected()}")
+    if not vc.is_connected():
+        vc._connected.set()
 
     sink = TranscriptionSink()
     for member in voice_state.channel.members:
         sink.user_names[member.id] = member.display_name
 
-    vc.start_recording(sink, lambda s, v: None, ctx.channel)
+    try:
+        async def _done(sink, channel):
+            pass
+        vc.start_recording(sink, _done, ctx.channel)
+    except Exception as e:
+        print(f"[transcribe] start_recording failed: {e}")
+        await vc.disconnect(force=True)
+        await ctx.followup.send(f"Failed to start recording: {e}", ephemeral=True)
+        return
+
+    live_task = asyncio.create_task(live_transcription_loop(ctx.guild_id))
 
     active_sessions[ctx.guild_id] = {
         "voice_client": vc,
         "sink": sink,
         "start_time": datetime.utcnow(),
         "channel": ctx.channel,
+        "live_task": live_task,
+        "transcript_lines": [],
     }
 
     await ctx.followup.send(
         f"🔴 Recording in **{voice_state.channel.name}**. Use `/stop` when done.",
         ephemeral=True,
     )
+
 
 @bot.slash_command(name="stop", description="Stop recording and post the summary")
 @check_admin()
@@ -176,6 +249,10 @@ async def status(ctx: discord.ApplicationContext):
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
+    for guild in bot.guilds:
+        if guild.voice_client:
+            await guild.voice_client.disconnect(force=True)
+            print(f"Cleaned up stale voice connection in {guild.name}")
 
 
 @bot.event

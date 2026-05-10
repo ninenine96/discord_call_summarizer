@@ -1,0 +1,46 @@
+Logged in as summarizer_bot#5732 (1491393410408513690)
+[transcribe] Connecting to Counter...
+[transcribe] connected, is_connected=True
+/home/rohan/discord_call_summarizer/discord_bot.py:212: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  "start_time": datetime.utcnow(),
+/home/rohan/discord_call_summarizer/venv/lib/python3.12/site-packages/whisper/transcribe.py:132: UserWarning: FP16 is not supported on CPU; using FP32 instead
+  warnings.warn("FP16 is not supported on CPU; using FP32 instead")
+[transcript] Icarus: You know, society is an illusion. Reality is also an illusion. Everything is an illusion. Nothing is real. We need to wake up. You were dreaming and then you woke up.
+/home/rohan/discord_call_summarizer/venv/lib/python3.12/site-packages/whisper/transcribe.py:132: UserWarning: FP16 is not supported on CPU; using FP32 instead
+  warnings.warn("FP16 is not supported on CPU; using FP32 instead")
+[transcript] User 738389772871139330: We are living in a matrix. We need to wake up.
+Error occurred while decoding opus frame.
+Error occurred while decoding opus frame.
+/home/rohan/discord_call_summarizer/venv/lib/python3.12/site-packages/whisper/transcribe.py:132: UserWarning: FP16 is not supported on CPU; using FP32 instead
+  warnings.warn("FP16 is not supported on CPU; using FP32 instead")
+[transcript] Icarus: but you didn't really wake up. So your brain, I think you let you woke up, but you didn't really. How can you be sure? How can you be sure though? Yes, we have to take the red pill. We have to take the black pill also. It's what comes after the red pill. To become the black pillers, bro. Red pillers, red pillers, and noobs.
+/home/rohan/discord_call_summarizer/venv/lib/python3.12/site-packages/whisper/transcribe.py:132: UserWarning: FP16 is not supported on CPU; using FP32 instead
+  warnings.warn("FP16 is not supported on CPU; using FP32 instead")
+[transcript] User 738389772871139330: We need to take the red pill. We have to become the red pillers or black pillers. We need to drink tea. I will blend the wipes.
+Error occurred while decoding opus frame.
+Error occurred while decoding opus frame.
+Error occurred while decoding opus frame.
+Error occurred while decoding opus frame.
+/home/rohan/discord_call_summarizer/venv/lib/python3.12/site-packages/whisper/transcribe.py:132: UserWarning: FP16 is not supported on CPU; using FP32 instead
+  warnings.warn("FP16 is not supported on CPU; using FP32 instead")
+[transcript] Icarus: Homan will be our brand ambassador to the red pillars. We need to recruit them to join the black pillars. Yes. Like we are in a prison taking medication for our mental health symptoms. And fuck Melvin, he is the reason everyone is in an illusion.
+/home/rohan/discord_call_summarizer/venv/lib/python3.12/site-packages/whisper/transcribe.py:132: UserWarning: FP16 is not supported on CPU; using FP32 instead
+  warnings.warn("FP16 is not supported on CPU; using FP32 instead")
+[transcript] User 738389772871139330: Everybody has to take the pill in a suppository form. Yes?
+Error occurred while decoding opus frame.
+Error occurred while decoding opus frame.
+Error occurred while decoding opus frame.
+/home/rohan/discord_call_summarizer/venv/lib/python3.12/site-packages/whisper/transcribe.py:132: UserWarning: FP16 is not supported on CPU; using FP32 instead
+  warnings.warn("FP16 is not supported on CPU; using FP32 instead")
+[transcript] Icarus: He makes us download all this bullshit and then we never really play. It's like, yo guys, final fantasy 69 good. Let's download then we download and then he doesn't play. Then he plays with his higher level. Yeah, then he's like complete dungeon 50, 60. Like fuck you bro. And download this 150 GB game for this. Yeah.
+/home/rohan/discord_call_summarizer/venv/lib/python3.12/site-packages/whisper/transcribe.py:132: UserWarning: FP16 is not supported on CPU; using FP32 instead
+  warnings.warn("FP16 is not supported on CPU; using FP32 instead")
+[transcript] User 738389772871139330: He's behind all this. Then he's like completed. Completing the engine. Reach level 40 after 30 hours and then I'll play with you.
+/home/rohan/discord_call_summarizer/venv/lib/python3.12/site-packages/whisper/transcribe.py:132: UserWarning: FP16 is not supported on CPU; using FP32 instead
+  warnings.warn("FP16 is not supported on CPU; using FP32 instead")
+/home/rohan/discord_call_summarizer/venv/lib/python3.12/site-packages/whisper/transcribe.py:132: UserWarning: FP16 is not supported on CPU; using FP32 instead
+  warnings.warn("FP16 is not supported on CPU; using FP32 instead")
+/home/rohan/discord_call_summarizer/discord_bot.py:146: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  minutes = int((datetime.utcnow() - start_time).total_seconds() // 60)
+/home/rohan/discord_call_summarizer/discord_bot.py:156: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  timestamp=datetime.utcnow(),

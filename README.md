@@ -1,110 +1,104 @@
 # Discord Call Summarizer
 
-A Discord bot that joins voice channels, listens to conversations, transcribes the audio using local Whisper, and posts periodic AI-generated summaries using a quantized Llama 3 model via Ollama. **Fully local — no cloud API keys needed.**
+A Discord bot that joins voice channels, records conversations, transcribes audio locally with Whisper, and posts AI-generated summaries via Ollama. **Fully local — no cloud API keys needed.**
 
 ## How it works
 
-1. A user invokes `!join` while in a voice channel
-2. The bot connects and starts recording all participants
-3. Every N minutes (default: 5), it:
-   - Harvests the recorded audio per user
-   - Transcribes each user's audio locally with faster-whisper (CTranslate2)
-   - Combines the transcripts with speaker labels
-   - Sends the transcript to a quantized Llama 3 model (via Ollama) for summarization
-   - Posts the summary as an embed in the designated text channel
-4. `!leave` stops recording, posts a final summary, and disconnects
+1. An admin uses `/transcribe` while in a voice channel
+2. The bot joins and records all participants as separate audio streams
+3. Every 30 seconds, audio is transcribed incrementally and logged to `bot.log`
+4. An admin uses `/stop` (or everyone leaves) to end the session
+5. The bot transcribes any remaining audio, sends the full transcript to Ollama, and posts a summary embed to the configured Discord channel
+
+Raw transcripts are logged locally to `bot.log` (as `[transcript] Name: text` lines) — they are not posted to Discord.
+
+## Prerequisites
+
+- Python 3.10+
+- A Discord bot token with **Message Content** and **Voice State** intents enabled
+- [Ollama](https://ollama.com/) installed with `llama3` pulled
+- `libopus` installed (`sudo apt install libopus0`)
 
 ## Setup
 
-### Prerequisites
-
-- Python 3.10+
-- A Discord bot token with **Voice** and **Message Content** intents enabled
-- [Ollama](https://ollama.com/) installed and running
-- FFmpeg installed on your system (`sudo apt install ffmpeg` or `brew install ffmpeg`)
-
-### Install Ollama & pull the model
+### 1. Install Ollama and pull the model
 
 ```bash
-# Install Ollama (Linux)
 curl -fsSL https://ollama.com/install.sh | sh
-
-# Pull quantized Llama 3 8B
-ollama pull llama3:8b-instruct-q4_K_M
+ollama pull llama3
 ```
 
-### Installation
+### 2. Clone and install dependencies
 
 ```bash
+git clone <repo>
 cd discord_call_summarizer
-pip install -e .
+python -m venv venv
+source venv/bin/activate
+
+# IMPORTANT: install py-cord, NOT discord.py — they share the same namespace
+pip install "py-cord[voice]" openai-whisper python-dotenv aiohttp davey
 ```
 
-### Configuration
+> **After any `pip install --force-reinstall` or venv rebuild**, three venv files must be re-patched — see CLAUDE.md for the exact changes. Discord requires DAVE (E2E voice encryption) support; without the patches, the bot receives audio but decodes silence and produces no transcript.
 
-Copy the example env file and fill in your values:
+### 3. Configure `.env`
 
-```bash
-cp .env.example .env
+```env
+DISCORD_TOKEN=your_bot_token_here
+SUMMARY_CHANNEL_ID=123456789012345678   # right-click channel → Copy ID
+ADMIN_ROLE_NAME=Admin                   # role that can use /transcribe and /stop
+WHISPER_MODEL_SIZE=base                 # tiny/base/small/medium — base is the sweet spot on CPU
+OLLAMA_HOST=http://localhost:11434
 ```
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `DISCORD_TOKEN` | Yes | — | Discord bot token |
-| `OLLAMA_HOST` | No | `http://localhost:11434` | Ollama server URL |
-| `OLLAMA_MODEL` | No | `llama3:8b-instruct-q4_K_M` | Ollama model for summarization |
-| `WHISPER_MODEL_SIZE` | No | `base` | Whisper model size (`tiny`, `base`, `small`, `medium`, `large-v3`) |
-| `WHISPER_DEVICE` | No | `cpu` | Device for Whisper inference (`cpu` or `cuda`) |
-| `WHISPER_COMPUTE_TYPE` | No | `int8` | Compute type (`int8`, `float16`, `float32`) |
-| `SUMMARY_CHANNEL_ID` | No | — | Text channel ID for summaries (defaults to command channel) |
-| `SUMMARY_INTERVAL` | No | `300` | Seconds between summaries |
-
-### Discord Bot Setup
+### 4. Discord Bot Setup
 
 1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
 2. Create a new application → Bot
-3. Enable these **Privileged Gateway Intents**:
-   - Message Content Intent
-   - Server Members Intent (optional, for display names)
-4. Generate an invite URL with these **Bot Permissions**:
-   - Connect
-   - Speak
-   - Send Messages
-   - Embed Links
+3. Enable **Privileged Gateway Intents**: Message Content Intent, Server Members Intent
+4. Generate an invite URL with permissions: Connect, Speak, Send Messages, Embed Links
 5. Invite the bot to your server
 
-### Run
+### 5. Run
 
 ```bash
-# Make sure Ollama is running
+# Start Ollama first
 ollama serve
 
-# In another terminal
-python -m bot.main
+# Start the bot (detached, restarts any existing instance, logs to bot.log)
+./start_bot.sh
+
+# Watch transcript lines as they come in
+grep -a "\[transcript\]" bot.log
 ```
 
 ## Commands
 
+All commands require the `Admin` role (or server administrator permissions).
+
 | Command | Description |
 |---|---|
-| `!join` | Join your voice channel and start recording |
-| `!leave` | Stop recording, post final summary, and disconnect |
-| `!summarize` | Immediately generate a summary of the conversation so far |
-| `!status` | Check if the bot is currently recording |
+| `/transcribe` | Join your current voice channel and start recording |
+| `/stop` | Stop recording and post the summary to Discord |
+| `/status` | Check recording status and elapsed time |
 
 ## Architecture
 
-```
-bot/
-├── __init__.py
-├── main.py            # Bot setup, commands, summary loop
-├── audio_sink.py      # Custom discord.py Sink for per-user audio capture
-├── transcription.py   # Local Whisper transcription (faster-whisper / CTranslate2)
-└── summarization.py   # Llama 3 summarization via Ollama
-```
+- `discord_bot.py` — all bot logic (slash commands, voice recording, 30s live transcription loop, summary posting)
+- `transcriber.py` — OpenAI Whisper transcription (runs in thread pool to avoid blocking the event loop)
+- `summariser.py` — Ollama HTTP summarization; contains the system prompt (currently a shitposter persona targeting Melwin — edit `SYSTEM_PROMPT` to change style)
+- `start_bot.sh` — process management: graceful stop → wait → start with unbuffered logging
+
+## Known Issues
+
+**Whisper FP16 warning** — `UserWarning: FP16 is not supported on CPU; using FP32 instead` is harmless. Whisper auto-falls back to FP32 on CPU.
+
+**bot.log may garble your terminal** — Whisper's progress bars write non-printable bytes. Use `grep -a "" bot.log` instead of `cat` or `tail -f`.
+
+**One decode error on session start** — The very first audio packet arrives before Discord's SSRC→user mapping is ready, so it gets dropped. This is expected and doesn't affect transcription quality.
 
 ## Resource Usage
 
-- **Whisper base** (int8): ~150 MB RAM, runs well on CPU
-- **Llama 3 8B Q4_K_M**: ~4.5 GB RAM via Ollama
-- For faster transcription on NVIDIA GPUs, set `WHISPER_DEVICE=cuda` and `WHISPER_COMPUTE_TYPE=float16`
+- **Whisper base**: ~150 MB RAM, ~10–30s per speaker per chunk on CPU
+- **Llama 3 (8B)**: ~4–5 GB RAM via Ollama
