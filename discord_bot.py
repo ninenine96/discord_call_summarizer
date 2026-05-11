@@ -4,6 +4,8 @@ import asyncio
 import io
 import logging
 import os
+import random
+import re
 import wave
 from datetime import datetime
 
@@ -17,6 +19,7 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 SUMMARY_CHANNEL_ID = int(os.getenv("SUMMARY_CHANNEL_ID", "0"))
 ADMIN_ROLE_NAME = os.getenv("ADMIN_ROLE_NAME", "Admin")
+GIPHY_API_KEY = os.getenv("GIFY_API_KEY")
 
 # Discord audio: 48 kHz, stereo, 16-bit PCM
 WAV_HEADER_BYTES = 44
@@ -101,7 +104,38 @@ async def live_transcription_loop(guild_id: int):
         pass
 
 
-async def finish_recording(guild_id: int, channel=None):
+def _extract_gif_query(summary: str) -> str:
+    # Prefer a direct quote from the transcript — most vivid for GIF search
+    quotes = re.findall(r'"([^"]{6,60})"', summary)
+    if quotes:
+        return quotes[0]
+    # Fall back to first meaty non-header line
+    for line in summary.splitlines():
+        line = re.sub(r'\*+', '', line).strip().lstrip('- ')
+        if len(line) > 25 and not line.startswith('|'):
+            return ' '.join(line.split()[:5])
+    return "chaos energy"
+
+
+async def _fetch_vibe_gif(query: str) -> str | None:
+    if not GIPHY_API_KEY:
+        return None
+    import aiohttp
+    params = {"api_key": GIPHY_API_KEY, "q": query, "limit": 10, "rating": "pg-13"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://api.giphy.com/v1/gifs/search", params=params) as resp:
+                data = await resp.json()
+                gifs = data.get("data", [])
+                if not gifs:
+                    return None
+                return random.choice(gifs)["images"]["downsized"]["url"]
+    except Exception as e:
+        print(f"[giphy] failed: {e}", flush=True)
+        return None
+
+
+async def finish_recording(guild_id: int, channel=None, mode: str = "shitpost"):
     session = active_sessions.pop(guild_id, None)
     if not session:
         return
@@ -111,6 +145,7 @@ async def finish_recording(guild_id: int, channel=None):
     start_time = session["start_time"]
     live_task = session.get("live_task")
     transcript_lines: list[str] = session.get("transcript_lines", [])
+    mode = session.get("mode", "shitpost")
     post_channel = channel or bot.get_channel(SUMMARY_CHANNEL_ID)
 
     if live_task:
@@ -134,7 +169,7 @@ async def finish_recording(guild_id: int, channel=None):
             if text and text.strip():
                 line = f"{name}: {text.strip()}"
                 transcript_lines.append(line)
-                logging.info(f"[transcript] {line}")
+                print(f"[transcript] {line}", flush=True)
         except Exception as e:
             logging.warning(f"Final transcription failed for {name}: {e}")
 
@@ -147,7 +182,10 @@ async def finish_recording(guild_id: int, channel=None):
     speaker_count = len({line.split(":")[0] for line in transcript_lines})
 
     await status_msg.edit(content="🧠 Summarising…")
-    summary = await summarise_transcript(full_transcript)
+    summary = await summarise_transcript(full_transcript, mode=mode)
+
+    if len(summary) > 4096:
+        summary = summary[:4093] + "…"
 
     embed = discord.Embed(
         title="📋 Meeting Summary",
@@ -157,6 +195,10 @@ async def finish_recording(guild_id: int, channel=None):
     )
     embed.set_footer(text=f"Call duration: ~{minutes} min • {speaker_count} speakers")
     await status_msg.edit(content=None, embed=embed)
+
+    gif_url = await _fetch_vibe_gif(_extract_gif_query(summary))
+    if gif_url:
+        await post_channel.send(f"**Meeting Vibe**\n{gif_url}")
 
 
 
@@ -213,6 +255,129 @@ async def transcribe(ctx: discord.ApplicationContext):
         "channel": ctx.channel,
         "live_task": live_task,
         "transcript_lines": [],
+        "mode": "shitpost",
+    }
+
+    await ctx.followup.send(
+        f"🔴 Recording in **{voice_state.channel.name}**. Use `/stop` when done.",
+        ephemeral=True,
+    )
+
+
+@bot.slash_command(name="minutes", description="Start recording — produces formal meeting minutes on /stop")
+@check_admin()
+async def minutes(ctx: discord.ApplicationContext):
+    await ctx.defer(ephemeral=True)
+
+    if not ctx.guild_id:
+        await ctx.followup.send("This command can only be used in a server.", ephemeral=True)
+        return
+
+    if ctx.guild_id in active_sessions:
+        await ctx.followup.send("Already recording.", ephemeral=True)
+        return
+
+    voice_state = ctx.user.voice
+    if not voice_state or not voice_state.channel:
+        await ctx.followup.send("Join a voice channel first.", ephemeral=True)
+        return
+
+    print(f"[minutes] Connecting to {voice_state.channel.name}...")
+    try:
+        vc = await voice_state.channel.connect(reconnect=False)
+    except Exception as e:
+        print(f"[minutes] connect() failed: {e}")
+        await ctx.followup.send("Failed to connect to voice channel.", ephemeral=True)
+        return
+
+    if not vc.is_connected():
+        vc._connected.set()
+
+    sink = TranscriptionSink()
+    for member in voice_state.channel.members:
+        sink.user_names[member.id] = member.display_name
+
+    try:
+        async def _done(sink, channel):
+            pass
+        vc.start_recording(sink, _done, ctx.channel)
+    except Exception as e:
+        print(f"[minutes] start_recording failed: {e}")
+        await vc.disconnect(force=True)
+        await ctx.followup.send(f"Failed to start recording: {e}", ephemeral=True)
+        return
+
+    live_task = asyncio.create_task(live_transcription_loop(ctx.guild_id))
+
+    active_sessions[ctx.guild_id] = {
+        "voice_client": vc,
+        "sink": sink,
+        "start_time": datetime.utcnow(),
+        "channel": ctx.channel,
+        "live_task": live_task,
+        "transcript_lines": [],
+        "mode": "business",
+    }
+
+    await ctx.followup.send(
+        f"🔴 Recording in **{voice_state.channel.name}**. Use `/stop` when done.",
+        ephemeral=True,
+    )
+
+
+@bot.slash_command(name="sync", description="Start recording — produces an ironic McKinsey debrief on /stop")
+@check_admin()
+async def sync(ctx: discord.ApplicationContext):
+    await ctx.defer(ephemeral=True)
+
+    if not ctx.guild_id:
+        await ctx.followup.send("This command can only be used in a server.", ephemeral=True)
+        return
+
+    if ctx.guild_id in active_sessions:
+        await ctx.followup.send("Already recording.", ephemeral=True)
+        return
+
+    voice_state = ctx.user.voice
+    if not voice_state or not voice_state.channel:
+        await ctx.followup.send("Join a voice channel first.", ephemeral=True)
+        return
+
+    print(f"[sync] Connecting to {voice_state.channel.name}...")
+    try:
+        vc = await voice_state.channel.connect(reconnect=False)
+    except Exception as e:
+        print(f"[sync] connect() failed: {e}")
+        await ctx.followup.send("Failed to connect to voice channel.", ephemeral=True)
+        return
+
+    if not vc.is_connected():
+        vc._connected.set()
+
+    sink = TranscriptionSink()
+    for member in voice_state.channel.members:
+        sink.user_names[member.id] = member.display_name
+
+    try:
+        async def _done(sink, channel):
+            pass
+        vc.start_recording(sink, _done, ctx.channel)
+    except Exception as e:
+        print(f"[sync] start_recording failed: {e}")
+        await vc.disconnect(force=True)
+        await ctx.followup.send(f"Failed to start recording: {e}", ephemeral=True)
+        return
+
+    live_task = asyncio.create_task(live_transcription_loop(ctx.guild_id))
+
+    active_sessions[ctx.guild_id] = {
+        "voice_client": vc,
+        "sink": sink,
+        "start_time": datetime.utcnow(),
+        "channel": ctx.channel,
+        "live_task": live_task,
+        "transcript_lines": [],
+        "mode": "synergy",
     }
 
     await ctx.followup.send(
@@ -228,7 +393,8 @@ async def stop(ctx: discord.ApplicationContext):
         await ctx.respond("No active recording.", ephemeral=True)
         return
     await ctx.respond("⏹ Stopping…", ephemeral=True)
-    await finish_recording(ctx.guild_id, channel=ctx.channel)
+    session_mode = active_sessions[ctx.guild_id].get("mode", "shitpost")
+    await finish_recording(ctx.guild_id, channel=ctx.channel, mode=session_mode)
 
 
 @bot.slash_command(name="status", description="Check if recording is active")
@@ -249,6 +415,9 @@ async def status(ctx: discord.ApplicationContext):
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
+    guild_ids = [guild.id for guild in bot.guilds]
+    await bot.sync_commands(guild_ids=guild_ids)
+    print(f"Commands synced to {len(guild_ids)} guild(s)")
     for guild in bot.guilds:
         if guild.voice_client:
             await guild.voice_client.disconnect(force=True)
